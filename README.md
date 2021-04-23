@@ -1,5 +1,5 @@
 # ICLabel Dataset
-
+This is a fork of the origina ICLabel-Dataset repository. This fork is to update the code to Python3 and to make it more memory efficient.
 ----
 ## What is ICLabel?
 ICLabel is a project aimed at advancing automated electroenephalographic (EEG) independent component (IC) classification. It is comprised of three interlinked parts: the [ICLabel classifier](https://github.com/lucapton/ICLabel), the [ICLabel website](https://iclabel.ucsd.edu/tutorial), and this dataset. The website crowdsources labels for the dataset that in turn is used to train the classifier.
