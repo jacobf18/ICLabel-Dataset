@@ -1,20 +1,23 @@
-from time import (time, gmtime, strftime)
-import h5py
 import os
-from shutil import rmtree
-from os.path import isdir, isfile, join, basename
-import cPickle as pkl
+import pickle as pkl
 import sqlite3
+import webbrowser as wb
 from collections import OrderedDict
 from copy import copy
+from os.path import basename, isdir, isfile, join
+from shutil import rmtree
+from time import gmtime, strftime, time
+from joblib import Parallel, delayed
 
-import numpy as np
-from sklearn.decomposition import PCA
+import h5py
 import joblib
-from matplotlib import pyplot as plt
-import webbrowser as wb
+import numpy as np
 import requests
 import tqdm
+from matplotlib import pyplot as plt
+from sklearn.decomposition import PCA
+
+import constant
 
 
 class ICLabelDataset:
@@ -884,10 +887,10 @@ class ICLabelDataset:
             self.base_url_download + 'ICLabels_expert.pkl',
             self.base_url_download + 'ICLabels_onlyluca.pkl',
         ]
-        self.feature_test_url = self.base_url_download + 'features_testset_full.mat'
-        self.label_test_url = self.base_url_download + 'ICLabels_test.pkl'
-        self.db_url = self.base_url_download + 'anonymized_database.sqlite'
-        self.cls_url = self.base_url_download + 'other_classifiers.mat'
+        self.feature_test_url = self.base_url_download + constant.FEATURES_TEST_FULL
+        self.label_test_url = self.base_url_download + constant.ICLABELS_TEST
+        self.db_url = self.base_url_download + constant.ANONYMIZED_DB
+        self.cls_url = self.base_url_download + constant.OTHER_CLASSIFIERS
 
     # util
 
@@ -898,7 +901,7 @@ class ICLabelDataset:
             for column in f[var_name]:
                 row_data = []
                 for row_number in range(len(column)):
-                    row_data.append(''.join(map(unichr, f[column[row_number]][:])))
+                    row_data.append(''.join(map(chr,list(f[column[row_number]][:].flatten()))))
                 var.append(row_data)
         return [str(x)[3:-2] for x in var]
 
@@ -964,23 +967,29 @@ class ICLabelDataset:
             feature_labels = []
             print('Loading full dataset...')
 
+            start_data = 0
+            end_data = 10
+
             self.check_for_download('train_features')
             # topo maps, old psd, dipole, and handcrafted
-            with h5py.File(join(self.datapath, 'features', 'features_0D1D2D.mat'), 'r') as f:
-                print('Loading 0D1D2D features...')
-                features.append(np.asarray(f['features']).T)
-                feature_labels.append(self.__load_matlab_cellstr(f, 'labels'))
+            # with h5py.File(join(self.datapath, 'features', 'features_0D1D2D.mat'), 'r') as f:
+            #     print('Loading 0D1D2D features...')
+            #     print(f.get('features').shape)
+            #     features.append(f['features'][0,:].T)
+            #     feature_labels.append(self.__load_matlab_cellstr(f, 'labels'))
             # new psd
             with h5py.File(join(self.datapath, 'features', 'features_PSD_med_var_kurt.mat'), 'r') as f:
                 print('Loading PSD features...')
-                features.append(list())
-                for element in f['features_out'][0]:
+                features.append(np.zeros([len(f['features_out'][0])*140,302]))
+                indx = 0
+                for i, element in tqdm.tqdm(enumerate(f['features_out'][0])):
                     data = np.array(f[element]).T
                     # if no data, skip
                     if data.ndim == 1 or data.dtype != np.float64:
                         continue
-                    nyquist = (data.shape[1] - 2) / 3
+                    nyquist = int((data.shape[1] - 2) / 3)
                     nfreq = 100
+
                     # if more than nfreqs, remove extra
                     if nyquist > nfreq:
                         data = data[:, np.concatenate((range(2 + nfreq),
@@ -995,8 +1004,16 @@ class ICLabelDataset:
                                                        range(2 + 2*nyquist, 2 + 3*nyquist),
                                                        np.repeat(1 + 3*nyquist, nfreq - nyquist))
                                                       ).astype(int)]
+                    
+                    features[-1][indx:data.shape[0],:] = data
+                    indx += data.shape[0]
+                    print(data.shape, indx)
+                    if i == 5:
+                        break
 
-                    features[-1].append(data)
+
+                print(len(features[-1]))
+
                 features[-1] = np.concatenate(features[-1], axis=0)
                 feature_labels.append(['ID_set', 'ID_ic'] + ['psd_median']*nfreq
                                       + ['psd_var']*nfreq + ['psd_kurt']*nfreq)
@@ -1004,7 +1021,7 @@ class ICLabelDataset:
             with h5py.File(join(self.datapath, 'features', 'features_AutoCorr.mat'), 'r') as f:
                 print('Loading AutoCorr features...')
                 features.append(list())
-                for element in f['features_out'][0]:
+                for element in tqdm.tqdm(f['features_out'][0][:1000]):
                     data = np.array(f[element]).T
                     if data.size > 2 and data.shape[1] == 102 and not len(data.dtype):
                         features[-1].append(data)
@@ -1023,7 +1040,7 @@ class ICLabelDataset:
             # load labels
             if self.label_type == 'database':
                 # load data from database
-                conn = sqlite3.connect(join(self.datapath, 'labels', 'database.sqlite'))
+                conn = sqlite3.connect(join(self.datapath, 'labels', constant.DATABASE))
                 c = conn.cursor()
                 dblabels = c.execute('SELECT * FROM labels '
                                      'INNER JOIN images ON labels.image_id = images.id '
@@ -1044,7 +1061,7 @@ class ICLabelDataset:
 
             elif self.label_type == 'luca':
                 # load data from database
-                conn = sqlite3.connect(join(self.datapath, 'labels', 'database.sqlite'))
+                conn = sqlite3.connect(join(self.datapath, 'labels', constant.DATABASE))
                 c = conn.cursor()
                 dblabelsluca = c.execute('SELECT * FROM labels '
                                          'INNER JOIN images ON labels.image_id = images.id '
@@ -1063,7 +1080,7 @@ class ICLabelDataset:
                 # load labels from files
                 with open(join(self.datapath, 'labels', file_name), 'rb') as f:
                     print('Loading labels...')
-                    data = pkl.load(f)
+                    data = pkl.load(f,encoding='latin1')
                     if 'transform' in data.keys():
                         transforms = data['transform']
                     else:
@@ -1087,10 +1104,11 @@ class ICLabelDataset:
 
             # check which labels are not kept
             print('Rearanging components and labels...')
-            kept_labels = [x for x, y in label2component.iteritems() if y in feature_inds[0]]
-            dropped_labels = [x for x, y in label2component.iteritems() if y not in feature_inds[0]]
+            kept_labels = [x for x, y in label2component.items() if y in feature_inds[0]]
+            dropped_labels = [x for x, y in label2component.items() if y not in feature_inds[0]]
 
             # for each label, pick a new component that is kept (if any)
+            print(feature_labels[0])
             ind_n_data_points = [x for x, y in enumerate(feature_labels[0]) if y == 'number of data points'][0]
             for ind in dropped_labels:
                 group = duplicate_order[label2component[ind]]
@@ -1209,7 +1227,7 @@ class ICLabelDataset:
             print('Saving aggregated dataset...')
             joblib.dump(dataset, join(self.datapath, 'cache', processed_file_name), 0)
 
-        # print time
+        # Print the time
         total = time() - start
         print('Time to load: ' + strftime("%H:%M:%S", gmtime(total)) +
               ':' + np.mod(total, 1).astype(str)[2:5] + '\t(HH:MM:SS:sss)')
@@ -1233,10 +1251,10 @@ class ICLabelDataset:
         # copy full dataset
         icl['unlabeled_features'] = \
             OrderedDict([(key, icl['unlabeled_features'][:, ind]) for key, ind
-                         in self.train_feature_indices.iteritems() if key in self.features])
+                         in self.train_feature_indices.items() if key in self.features])
         icl['labeled_features'] = \
             OrderedDict([(key, icl['labeled_features'][:, ind]) for key, ind
-                         in self.train_feature_indices.iteritems() if key in self.features])
+                         in self.train_feature_indices.items() if key in self.features])
 
         # set ids to int
         icl['unlabeled_features']['ids'] = icl['unlabeled_features']['ids'].astype(int)
@@ -1246,7 +1264,7 @@ class ICLabelDataset:
         # validation set of random labeled components for overfitting / convergence estimation
         try:
             valid_ind = rng.choice(icl['labeled_features']['ids'].shape[0], size=100, replace=False)
-        except:
+        except Exception:
             valid_ind = rng.choice(icl['labeled_features']['ids'].shape[0], size=100, replace=True)
         # random unlabeled datasets for manual analysis
         test_datasets = rng.choice(np.unique(icl['unlabeled_features']['ids'][:, 0]),
@@ -1306,9 +1324,7 @@ class ICLabelDataset:
             icl['labeled_features']['mi'] = self.normalize_mi_features(icl['labeled_features']['mi'])
 
         # recast labels
-        if self.label_type == 'database':
-            pass
-        else:
+        if self.label_type != 'database':
             icl['labeled_labels'] = [x.astype(np.float32) for x in icl['labeled_labels']]
             if 'labeled_label_covariances' in icl.keys():
                 icl['labeled_label_covariances'] = [x.astype(np.float32) for x in icl['labeled_label_covariances']]
@@ -1317,11 +1333,11 @@ class ICLabelDataset:
         print('Splitting and shuffling data...')
         #  unlabeled training set
         ind = rng.permutation(np.setdiff1d(range(icl['unlabeled_features']['ids'].shape[0]), test_ind))
-        x_u = OrderedDict([(key, val[ind]) for key, val in icl['unlabeled_features'].iteritems()])
+        x_u = OrderedDict([(key, val[ind]) for key, val in icl['unlabeled_features'].items()])
         y_u = None
         # labeled training set
         ind = rng.permutation(np.setdiff1d(range(icl['labeled_features']['ids'].shape[0]), valid_ind))
-        x_l = OrderedDict([(key, val[ind]) for key, val in icl['labeled_features'].iteritems()])
+        x_l = OrderedDict([(key, val[ind]) for key, val in icl['labeled_features'].items()])
         if self.label_type == 'database':
             print(icl['labeled_labels'][0])
             y_l = [icl['labeled_labels'][x] for x in ind]
@@ -1331,7 +1347,7 @@ class ICLabelDataset:
                 c_l = [x[ind] for x in icl['labeled_label_covariances']]
         # validation set.
         rng.shuffle(valid_ind)
-        x_v = OrderedDict([(key, val[valid_ind]) for key, val in icl['labeled_features'].iteritems()])
+        x_v = OrderedDict([(key, val[valid_ind]) for key, val in icl['labeled_features'].items()])
         if self.label_type == 'database':
             y_v = [icl['labeled_labels'][x] for x in valid_ind]
         else:
@@ -1340,7 +1356,7 @@ class ICLabelDataset:
                 c_v = [x[valid_ind] for x in icl['labeled_label_covariances']]
         # unlabeled test set.
         rng.shuffle(test_ind)
-        x_t = OrderedDict([(key, val[test_ind]) for key, val in icl['unlabeled_features'].iteritems()])
+        x_t = OrderedDict([(key, val[test_ind]) for key, val in icl['unlabeled_features'].items()])
         y_t = None
 
         train_u = (x_u, y_u)
@@ -1354,7 +1370,7 @@ class ICLabelDataset:
         else:
             val = (x_v, y_v)
 
-        # print time
+        # Print the time
         total = time() - start
         print('Time to load: ' + strftime("%H:%M:%S", gmtime(total)) +
               ':' + np.mod(total, 1).astype(str)[2:5] + '\t(HH:MM:SS:sss)')
@@ -1374,7 +1390,7 @@ class ICLabelDataset:
         self.check_for_download(('test_labels', 'test_features'))
 
         # load features
-        with h5py.File(join(self.datapath, 'features', 'features_testset_full.mat'), 'r') as f:
+        with h5py.File(join(self.datapath, 'features', constant.FEATURES_TEST_FULL), 'r') as f:
             features = np.asarray(f['features']).T
             feature_labels = self.__load_matlab_cellstr(f, 'feature_label')
             channel_features = []
@@ -1382,15 +1398,15 @@ class ICLabelDataset:
                 # expand
                 dataset = f[dataset].value.flatten()
                 # expand and format
-                id = f[dataset[0]].value.flatten()
-                chans = [''.join(map(unichr, f[x].value.flatten())) for x in f[dataset[1]].value.flatten()]
+                i = f[dataset[0]].value.flatten()
+                chans = [''.join(map(chr, f[x].value.flatten())) for x in f[dataset[1]].value.flatten()]
                 icamat = f[dataset[2]].value.T
                 # append
-                channel_features.append([id, chans, icamat[:, :3], icamat[:, 3:]])
+                channel_features.append([i, chans, icamat[:, :3], icamat[:, 3:]])
 
         # load labels
-        with open(join(self.datapath, 'labels', 'ICLabels_test.pkl'), 'rb') as f:
-            labels = pkl.load(f)
+        with open(join(self.datapath, 'labels', constant.ICLABELS_TEST), 'rb') as f:
+            labels = pkl.load(f,encoding='latin1')
 
         # match features and labels
         _, _, ind = np.intersect1d(labels['instance_id'], labels['instance_number'], return_indices=True)
@@ -1410,7 +1426,7 @@ class ICLabelDataset:
         # convert to ordered dict
         features = \
             OrderedDict([(key, features[:, ind]) for key, ind
-                         in self.test_feature_indices.iteritems() if key in self.features])
+                         in self.test_feature_indices.items() if key in self.features])
 
         # process features
         if process_features:
@@ -1464,7 +1480,7 @@ class ICLabelDataset:
                     continue
                 # expand and format
                 ids.append(f[dataset[0]].value.flatten())
-                chans.append([''.join(map(unichr, f[x].value.flatten())) for x in f[dataset[1]].value.flatten()])
+                chans.append([''.join(map(chr, f[x].value.flatten())) for x in f[dataset[1]].value.flatten()])
                 icamat = f[dataset[2]].value.T
                 xyz.append(icamat[:, :3])
                 icamats.append(icamat[:, 3:])
@@ -1494,7 +1510,7 @@ class ICLabelDataset:
         #   5: brain, muscle, eye, heart, other
         # exception for eye_catch which is always [eye] where eye >= 0.93 is the threshold for detection
         classifications = {}
-        for cls, lab in raw.iteritems():
+        for cls, lab in raw.items():
             if cls == 'adjust':
                 if n_cls == 2:
                     non_brain = raw[cls].max(1, keepdims=True)
@@ -1504,12 +1520,10 @@ class ICLabelDataset:
                     eye = raw[cls][:, :-1].max(1, keepdims=True)
                     other = raw[cls][:, -1:]
                     classifications[cls] = np.concatenate((brain, eye, other), 1)
-            elif cls == 'mara':
-                if n_cls == 2:
-                    classifications[cls] = np.concatenate((1 - raw[cls], raw[cls]), 1)
-            elif cls == 'faster':
-                if n_cls == 2:
-                    classifications[cls] = np.concatenate((1 - raw[cls], raw[cls]), 1)
+            elif cls == 'mara' and n_cls == 2:
+                classifications[cls] = np.concatenate((1 - raw[cls], raw[cls]), 1)
+            elif cls == 'faster' and n_cls == 2:
+                classifications[cls] = np.concatenate((1 - raw[cls], raw[cls]), 1)
             elif cls == 'ic_marc': # ['blink', 'neural', 'heart', 'lat. eye', 'muscle', 'mixed']
                 brain = raw[cls][:, 1:2]
                 if n_cls == 2:
@@ -1539,14 +1553,14 @@ class ICLabelDataset:
 
         # load classifications
         classifications = {}
-        with h5py.File(join(self.datapath, 'other', 'other_classifiers.mat'), 'r') as f:
+        with h5py.File(join(self.datapath, 'other', constant.OTHER_CLASSIFIERS), 'r') as f:
             print('Loading classifications...')
-            for cls, lab in f.iteritems():
+            for cls, lab in f.items():
                 classifications[cls] = lab[:].T
 
         # match to given ids
         if ids is not None:
-            for cls, lab in classifications.iteritems():
+            for cls, lab in classifications.items():
                 _, ind_id, ind_lab = np.intersect1d((ids * [100, 1]).sum(1), (lab[:, :2].astype(int) * [100, 1]).sum(1),
                                                     return_indices=True)
                 classifications[cls] = np.empty((ids.shape[0], lab.shape[1] - 2))
@@ -1638,16 +1652,16 @@ class ICLabelDataset:
             os.mkdir(join(self.datapath, folder))
         for it in range(n_files):
             print('Downloading file part {} of {}...'.format(it + 1, n_files))
-            zip_name = base_filename + '{:02d}.zip'.format(it)
+            zip_name = base_filename + constant.FORMAT.format(it)
             self._download(self.feature_train_zip_parts_url.format(it), zip_name)
 
         print('Combining file parts...')
         with open(base_filename + '.zip', 'wb') as f:
             for it in range(n_files):
-                with open(base_filename + '{:02d}.zip'.format(it), 'rb') as f_part:
+                with open(base_filename + constant.FORMAT.format(it), 'rb') as f_part:
                     f.write(f_part.read())
         for it in range(n_files):
-            os.remove(base_filename + '{:02d}.zip'.format(it))
+            os.remove(base_filename + constant.FORMAT.format(it))
 
         print('Extracting zipped ICLabel training set features...')
         from zipfile import ZipFile
@@ -1664,7 +1678,7 @@ class ICLabelDataset:
         folder = 'labels'
         if not isdir(join(self.datapath, folder)):
             os.mkdir(join(self.datapath, folder))
-        self._download(self.label_test_url, join(self.datapath, folder, 'ICLabels_test.pkl'))
+        self._download(self.label_test_url, join(self.datapath, folder, constant.ICLABELS_TEST))
 
     def download_testset_features(self):
         """
@@ -1674,7 +1688,7 @@ class ICLabelDataset:
         folder = 'features'
         if not isdir(join(self.datapath, folder)):
             os.mkdir(join(self.datapath, folder))
-        self._download(self.feature_test_url, join(self.datapath, folder, 'features_testset_full.mat'))
+        self._download(self.feature_test_url, join(self.datapath, folder, constant.FEATURES_TEST_FULL))
 
     def download_database(self):
         """
@@ -1684,7 +1698,7 @@ class ICLabelDataset:
         folder = 'labels'
         if not isdir(join(self.datapath, folder)):
             os.mkdir(join(self.datapath, folder))
-        self._download(self.db_url, join(self.datapath, folder, 'database.sqlite'))
+        self._download(self.db_url, join(self.datapath, folder, constant.DATABASE))
 
     def download_icclassifications(self):
         """
@@ -1694,7 +1708,7 @@ class ICLabelDataset:
         folder = 'other'
         if not isdir(join(self.datapath, folder)):
             os.mkdir(join(self.datapath, folder))
-        self._download(self.cls_url, join(self.datapath, folder, 'other_classifiers.mat'))
+        self._download(self.cls_url, join(self.datapath, folder, constant.OTHER_CLASSIFIERS))
 
     def check_for_download(self, data_type):
         """
@@ -1718,17 +1732,16 @@ class ICLabelDataset:
                         'It is a large download which you may accomplish through calling the method ' \
                         '"download_trainset_features()".'
             elif val == 'test_labels':
-                if not isfile(join(self.datapath, 'labels', 'ICLabels_test.pkl')):
+                if not isfile(join(self.datapath, 'labels', constant.ICLABELS_TEST)):
                     self.download_testset_cllabels()
             elif val == 'test_features':
                 if not isfile(join(self.datapath, 'features', 'features_testset_full.mat')):
                     self.download_testset_features()
             elif val == 'database':
-                if not isfile(join(self.datapath, 'labels', 'database.sqlite')):
+                if not isfile(join(self.datapath, 'labels', constant.DATABASE)):
                     self.download_database()
-            elif val == 'classifications':
-                if not isfile(join(self.datapath, 'other', 'other_classifiers.mat')):
-                    self.download_icclassifications()
+            elif val == 'classifications' and not isfile(join(self.datapath, 'other', constant.OTHER_CLASSIFIERS)):
+                self.download_icclassifications()
 
 
     # data normalization
@@ -1917,7 +1930,7 @@ class ICLabelDataset:
                 data = data.T
                 nax = data.shape[0]
             if nax > self.max_grid_plot:
-                print 'Too many plots requested.'
+                print(constant.TOO_MANY)
                 return
 
             self._plot_grid(data, self.plot_topo)
@@ -1944,7 +1957,7 @@ class ICLabelDataset:
         else:
             nax = data.shape[0]
             if nax > self.max_grid_plot:
-                print 'Too many plots requested.'
+                print(constant.TOO_MANY)
                 return
 
             self._plot_grid(data, self.plot_psd)
@@ -1968,7 +1981,7 @@ class ICLabelDataset:
         else:
             nax = data.shape[0]
             if nax > self.max_grid_plot:
-                print 'Too many plots requested.'
+                print(constant.TOO_MANY)
                 return
 
             self._plot_grid(data, self.plot_autocorr)

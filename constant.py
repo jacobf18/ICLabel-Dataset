@@ -1,0 +1,7 @@
+FEATURES_TEST_FULL = 'features_testset_full.mat'
+ICLABELS_TEST = 'ICLabels_test.pkl'
+OTHER_CLASSIFIERS = 'other_classifiers.mat'
+DATABASE = 'database.sqlite'
+ANONYMIZED_DB = 'anonymized_database.sqlite'
+TOO_MANY = 'Too many plots requested.'
+FORMAT = '{:02d}.zip'
