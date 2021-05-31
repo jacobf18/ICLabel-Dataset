@@ -1,8 +1,8 @@
 from icldata import ICLabelDataset
 
 icl = ICLabelDataset(combine_output=True)
-
-icldata = icl.load_semi_supervised()
+icl.download_trainset_features()
+# icldata = icl.load_semi_supervised()
 
 # import pickle as pkl
 # import constant
